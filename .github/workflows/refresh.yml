@@ -1,0 +1,121 @@
+name: Refresh GeoLite2
+
+# Pulls the latest GeoLite2-City archives from MaxMind, verifies their
+# checksums, and publishes them as release assets that the openZro
+# management server downloads on cold boot. MaxMind refreshes their
+# build twice a week (Tuesday + Friday); we run a couple of hours
+# after their publish window to catch the new build with one cron
+# fire.
+#
+# The MAXMIND_LICENSE_KEY secret lives in the `production` environment
+# of this repo. Rotate it via Settings → Environments → production →
+# Environment secrets — no code change needed.
+
+on:
+  schedule:
+    # Tue + Fri at 06:00 UTC. MaxMind typically publishes around 04:00
+    # UTC; this leaves enough slack for their CDN propagation.
+    - cron: "0 6 * * 2,5"
+  workflow_dispatch:
+
+permissions:
+  contents: write  # gh release create
+
+concurrency:
+  group: refresh-geolite2
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Download + verify MaxMind archives
+        id: download
+        env:
+          KEY: ${{ secrets.MAXMIND_LICENSE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${KEY:-}" ]; then
+            echo "::error::MAXMIND_LICENSE_KEY not set in environment 'production'"
+            exit 1
+          fi
+
+          base="https://download.maxmind.com/app/geoip_download"
+          mkdir -p out
+
+          # Download each (edition, suffix) pair plus its sha256, verify
+          # against MaxMind's published checksum, then rewrite the .sha256
+          # to reference our un-dated asset filename so `sha256sum -c`
+          # works against the released artifacts directly.
+          for pair in "GeoLite2-City:tar.gz" "GeoLite2-City-CSV:zip"; do
+            edition="${pair%%:*}"
+            suffix="${pair##*:}"
+            archive="out/${edition}.${suffix}"
+            checksum="${archive}.sha256"
+
+            echo "::group::Downloading ${edition}.${suffix}"
+            curl -fsSL --retry 3 --retry-delay 10 \
+              -o "$archive" \
+              "${base}?edition_id=${edition}&license_key=${KEY}&suffix=${suffix}"
+            curl -fsSL --retry 3 --retry-delay 10 \
+              -o "$checksum" \
+              "${base}?edition_id=${edition}&license_key=${KEY}&suffix=${suffix}.sha256"
+
+            expected=$(awk '{print $1}' "$checksum")
+            actual=$(sha256sum "$archive" | awk '{print $1}')
+            if [ "$expected" != "$actual" ]; then
+              echo "::error::Checksum mismatch on ${archive}: expected $expected, got $actual"
+              exit 1
+            fi
+            echo "Checksum OK: $actual"
+            echo "::endgroup::"
+
+            # Rewrite checksum file with un-dated filename. MaxMind's
+            # original line references `GeoLite2-City_YYYYMMDD.tar.gz`;
+            # our asset is `GeoLite2-City.tar.gz`.
+            echo "${actual}  ${edition}.${suffix}" > "$checksum"
+
+            # Capture the date from MaxMind's filename for the release
+            # tag — pulled from the `Content-Disposition` header on the
+            # archive download.
+            if [ "$edition" = "GeoLite2-City" ]; then
+              dated=$(curl -sIL --retry 3 \
+                "${base}?edition_id=${edition}&license_key=${KEY}&suffix=${suffix}" \
+                | tr -d '\r' \
+                | sed -n 's/.*filename=\(.*\)/\1/Ip' \
+                | tail -n1)
+              date_part=$(echo "$dated" | sed -n 's/.*_\([0-9]\{8\}\).*/\1/p')
+              if [ -z "$date_part" ]; then
+                echo "::error::Could not extract date from MaxMind filename: '$dated'"
+                exit 1
+              fi
+              echo "date=$date_part" >> "$GITHUB_OUTPUT"
+              echo "MaxMind build date: $date_part"
+            fi
+          done
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DATE: ${{ steps.download.outputs.date }}
+        run: |
+          set -euo pipefail
+          tag="geolite2-${DATE}"
+
+          # Idempotency: if MaxMind hasn't cut a new build since the
+          # last cron fire (e.g. holiday week), skip rather than fail.
+          if gh release view "$tag" --json tagName >/dev/null 2>&1; then
+            echo "Release $tag already exists; nothing to publish."
+            exit 0
+          fi
+
+          gh release create "$tag" \
+            --title "GeoLite2 ${DATE}" \
+            --notes "Automatic mirror of MaxMind GeoLite2 City database (build ${DATE}). MaxMind retains ownership of the GeoLite2 data; redistribution under their [EULA](https://www.maxmind.com/en/geolite2/eula)." \
+            --latest \
+            out/GeoLite2-City.tar.gz \
+            out/GeoLite2-City.tar.gz.sha256 \
+            out/GeoLite2-City-CSV.zip \
+            out/GeoLite2-City-CSV.zip.sha256
