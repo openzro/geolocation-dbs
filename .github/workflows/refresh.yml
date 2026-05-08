@@ -30,6 +30,14 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
+      - name: Checkout
+        # `gh release create` reads the repo's remote URL from .git
+        # to know which repo to target — skip this and the publish
+        # step fails with "fatal: not a git repository". We don't
+        # need any source files; the workflow itself runs from the
+        # GitHub-managed runner image.
+        uses: actions/checkout@v4
+
       - name: Download + verify MaxMind archives
         id: download
         env:
