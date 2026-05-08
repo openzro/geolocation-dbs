@@ -10,7 +10,7 @@ checks and dashboard analytics).
 > the [GeoLite2 End User License Agreement](https://www.maxmind.com/en/geolite2/eula).
 > Operators who prefer to fetch directly from MaxMind can pass
 > `--maxmind-license-key` to `openzro management` instead — see the
-> [self-hosted geolocation guide](https://docs.openzro.io/selfhosted/geolocation).
+> [self-hosted geolocation guide](https://docs.openzro.io/selfhosted/geo-support).
 
 ## How it's used
 
